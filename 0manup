@@ -1,0 +1,279 @@
+#!/usr/bin/env python
+from __future__ import print_function
+import os, sys
+import logging
+import optparse
+import tempfile
+import shutil
+import contextlib
+
+from zeroinstall import SafeException
+from zeroinstall.injector.namespaces import XMLNS_IFACE
+from zeroinstall.injector.fetch import StepRunner
+from zeroinstall.zerostore.manifest import verify, get_algorithm
+from zeroinstall.zerostore import unpack, format_algorithm_digest_pair, parse_algorithm_digest_pair
+from zeroinstall.injector.model import DownloadSource, FileSource, RenameStep, RemoveStep, InvalidInterface
+from xml.dom import minidom
+
+def _(s): return s
+
+logger = logging.getLogger()
+
+class SoureMissing(SafeException):
+	pass
+
+class NonBlocker(object):
+	# ZI implementation uses concurrent tasks. Since all our ops
+	# are local, we'll just do everything synchronously
+	happened = True
+
+def _get_long(elem, attr):
+	val = elem.getAttribute(attr)
+	if val:
+		return int(val)
+	else:
+		return None
+
+class Recipe(object):
+	def __init__(self, impl):
+		self.steps = []
+		self.manifest_elem = None
+		self.implementation = impl
+		self.impl_version = impl.getAttribute("version")
+
+class Cooker(object):
+	def __init__(self, source_root):
+		self.source_root = source_root
+		self.modified = False
+	
+	def setattr(self, elem, attr, val):
+		self.modified = True
+		elem.setAttribute(attr, val)
+	
+	@contextlib.contextmanager
+	def cook(self, recipe):
+		steps = []
+		blockers = [] # dummy
+		build_root = tempfile.mkdtemp(prefix='zi-cooker-')
+		print(" - building in %s" % (build_root))
+		try:
+			for stepdata in recipe.steps:
+				cls = StepRunner.class_for(stepdata)
+				step = cls(stepdata, impl_hint = None)
+				step.prepare(self, blockers)
+				steps.append(step)
+
+			# Unpack each of the downloaded archives into it in turn
+			for step in steps:
+				step.apply(build_root)
+
+			yield build_root
+		finally:
+			shutil.rmtree(build_root)
+			for step in steps:
+				try:
+					step.close()
+				except IOError as ex:
+					# Can get "close() called during
+					# concurrent operation on the same file
+					# object." if we're unlucky (Python problem).
+					logger.info("Failed to close: %s", ex)
+	
+	# functions required by StepRunner instances:
+	def download_url(self, download_source, **kwargs):
+
+		mime_type = download_source.type
+		if not mime_type:
+			mime_type = unpack.type_from_url(download_source.url)
+		if not mime_type:
+			raise SafeException(_("No 'type' attribute on archive, and I can't guess from the name (%s)") % download_source.url)
+		unpack.check_type_ok(mime_type)
+
+		stream = open(self.resolve_file(download_source.url))
+		return (NonBlocker(), stream)
+
+	download_file = download_archive = download_url
+
+	def load_feed(self, path):
+		with open(path) as stream:
+			return minidom.parse(stream)
+	
+	def resolve_file(self, url):
+		'''get a local file (in `base`) from URL'''
+		filename = url.rsplit('/', 1)[-1] if '/' in url else url
+		return os.path.join(self.source_root, filename)
+
+	def each_recipe(self, feed):
+		def find_impls(root):
+			return root.getElementsByTagNameNS(XMLNS_IFACE, "implementation")
+
+		for impl in find_impls(feed):
+			recipe = Recipe(impl)
+			def add_archive(elem):
+				url = elem.getAttribute('href')
+				if not url:
+					raise InvalidInterface(_("Missing href attribute on <archive>"))
+				size = elem.getAttribute('size')
+				if not size:
+					cooker.setattr(elem, 'size', str(os.stat(self.resolve_file(url)).st_size))
+				recipe.steps.append(DownloadSource(None, url = url, size = int(size),
+						extract = elem.getAttribute('extract') or None,
+						start_offset = _get_long(elem, 'start-offset'),
+						type = elem.getAttribute('type') or None,
+						dest = elem.getAttribute('dest') or None))
+
+			def add_file(elem):
+				url = elem.getAttribute('href')
+				if not url:
+					raise InvalidInterface(_("Missing href attribute on <file>"))
+				dest = elem.getAttribute('dest')
+				if not dest:
+					raise InvalidInterface(_("Missing dest attribute on <file>"))
+				size = elem.getAttribute('size')
+				if not size:
+					print("size=\"%s\"" % (os.stat(self.resolve_file(url)).st_size))
+				recipe.steps.append(FileSource(url, dest, int(size)))
+
+			def add_rename(elem):
+				source = elem.getAttribute('source')
+				if not source:
+					raise InvalidInterface(_("Missing source attribute on <rename>"))
+				dest = elem.getAttribute('dest')
+				if not dest:
+					raise InvalidInterface(_("Missing dest attribute on <rename>"))
+				recipe.steps.append(RenameStep(source=source, dest=dest))
+			
+			def add_remove(elem):
+				path = recipe_step.getAttribute('path')
+				if not path:
+					raise InvalidInterface(_("Missing path attribute on <remove>"))
+				recipe.steps.append(RemoveStep(path=path))
+
+			for elem in impl.childNodes:
+				if elem.namespaceURI != XMLNS_IFACE: continue
+				if elem.tagName == 'archive':
+					add_archive(elem)
+				elif elem.tagName == 'file':
+					add_file(elem)
+				elif elem.tagName == 'recipe':
+					for recipe_step in elem.childNodes:
+						if recipe_step.namespaceURI != XMLNS_IFACE: continue
+						name = recipe_step.tagName
+						if name == 'archive':
+							add_archive(recipe_step)
+						elif name == 'file':
+							add_file(recipe_step)
+						elif name == 'rename':
+							add_rename(recipe_step)
+						elif name == 'remove':
+							add_remove(recipe_step)
+						else:
+							logger.info(_("Unknown step '%s' in recipe; skipping recipe"), recipe_step.tagName)
+							break
+				elif elem.tagName == 'manifest-digest':
+					recipe.manifest_elem = elem
+
+			if recipe.steps:
+				yield impl.getAttribute("id"), recipe
+
+def get_digest(algname, tmpdir):
+	alg = get_algorithm(algname)
+	digest = alg.new_digest()
+	for line in alg.generate_manifest(tmpdir):
+		# print(line)
+		digest.update((line + '\n').encode('utf-8'))
+	(_ignore, digest) = parse_algorithm_digest_pair(alg.getID(digest))
+	return digest
+
+def main():
+	parser = optparse.OptionParser("Usage: %prog [OPTIONS] feed [implementation [ ... ]]")
+	parser.add_option('-b', '--base', default=os.getcwd(), help='location of archive files (default: cwd())')
+	parser.add_option('-a', '--algs', default='sha256new', help='comma-separated list of manifest-digest algorithms to add (only used if no <manifest-digest> tag is present)')
+	parser.add_option('-i', '--interactive', action='store_true')
+	opts, args = parser.parse_args()
+
+	assert len(args) > 0, parser.format_help()
+	feed_file = args.pop(0)
+	implementation_ids = args
+
+	cooker = Cooker(os.path.expanduser(opts.base))
+
+	feed = cooker.load_feed(feed_file)
+
+	def process(id, recipe):
+		print("processing implementation %s" % (id,))
+		with cooker.cook(recipe) as tmpdir:
+			if recipe.manifest_elem:
+				algnames = list(recipe.manifest_elem.attributes.keys())
+			else:
+				algnames = opts.algs.split(',')
+				elem = feed.createElementNS(XMLNS_IFACE, 'manifest-digest')
+				recipe.manifest_elem = elem
+				recipe.implementation.appendChild(elem)
+
+			for algname in algnames:
+				algname = algname.strip()
+				if not algname: continue
+
+				existing = recipe.manifest_elem.getAttribute(algname)
+				digest = get_digest(algname, tmpdir)
+
+				if existing != digest:
+					print(" - setting %s=%s" % (algname, digest))
+					cooker.setattr(recipe.manifest_elem, algname, digest)
+
+			try:
+				(algname, val) = parse_algorithm_digest_pair(id)
+			except BadDigest:
+				print("implementation ID is not a digest; leaving")
+			else:
+				digest = get_digest(algname, tmpdir)
+				if digest != val:
+					new_id = format_algorithm_digest_pair(algname, digest)
+					print(" - setting implementation ID to %s" % (new_id))
+					cooker.setattr(recipe.implementation, 'id', new_id)
+
+			if opts.interactive:
+				print("Build complete (in %s). Press return to remove\n" % (tmpdir))
+				raw_input()
+
+
+	if implementation_ids:
+		for id, recipe in cooker.each_recipe(feed):
+			if id in implementation_ids:
+				process(id, recipe)
+				implementation_ids.remove(id)
+		if implementation_ids:
+			raise SafeException("can't find implementation with ID %s" % (', '.join(implementation_ids)))
+	else:
+		for id, recipe in cooker.each_recipe(feed):
+			# firstly, *can* we process this impl?
+			required_files = filter(None, [getattr(step, 'url', None) for step in recipe.steps])
+			required_files = map(cooker.resolve_file, required_files)
+			missing_files = list(filter(lambda f: not os.path.exists(f), required_files))
+			if missing_files:
+				print_args = (recipe.impl_version, id, ', '.join(map(os.path.basename, missing_files)))
+				if recipe.manifest_elem:
+					print("Assuming valid implementation (v%s, %s) - missing files: %s" % print_args)
+					continue
+				else:
+					raise SafeException("Can't check implementation (v%s, %s) - missing files: " % print_args)
+			else:
+				process(id, recipe)
+	
+	if cooker.modified:
+		backup_filename = feed_file + '.bak'
+		shutil.copy(feed_file, backup_filename)
+		print("Writing modified feed... (saved backup to %s)" % (backup_filename))
+		with open(feed_file, 'w') as output:
+			feed.writexml(output)
+			output.write('\n')
+
+if __name__ == '__main__':
+	try:
+		main()
+	except AssertionError as e:
+		print(str(e), file=sys.stderr)
+		sys.exit(1)
+	except KeyboardInterrupt:
+		sys.exit(1)
