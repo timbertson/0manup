@@ -22,7 +22,6 @@ download files).
 			<runner interface="http://repo.roscidus.com/python/python"/>
 		</command>
 		<requires interface="http://repo.roscidus.com/python/python">
-			<version not-before="3"/>
 		</requires>
 		<requires interface="http://0install.net/2007/interfaces/ZeroInstall.xml">
 			<version not-before="2.2"/>
