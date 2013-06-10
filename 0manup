@@ -11,7 +11,7 @@ from zeroinstall import SafeException
 from zeroinstall.injector.namespaces import XMLNS_IFACE
 from zeroinstall.injector.fetch import StepRunner
 from zeroinstall.zerostore.manifest import verify, get_algorithm
-from zeroinstall.zerostore import unpack, format_algorithm_digest_pair, parse_algorithm_digest_pair
+from zeroinstall.zerostore import unpack, format_algorithm_digest_pair, parse_algorithm_digest_pair, BadDigest
 from zeroinstall.injector.model import DownloadSource, FileSource, RenameStep, RemoveStep, InvalidInterface
 from xml.dom import minidom
 
@@ -115,7 +115,8 @@ class Cooker(object):
 					raise InvalidInterface(_("Missing href attribute on <archive>"))
 				size = elem.getAttribute('size')
 				if not size:
-					cooker.setattr(elem, 'size', str(os.stat(self.resolve_file(url)).st_size))
+					size = os.stat(self.resolve_file(url)).st_size
+					self.setattr(elem, 'size', str(size))
 				recipe.steps.append(DownloadSource(None, url = url, size = int(size),
 						extract = elem.getAttribute('extract') or None,
 						start_offset = _get_long(elem, 'start-offset'),
@@ -257,7 +258,7 @@ def main():
 					print("Assuming valid implementation (v%s, %s) - missing files: %s" % print_args)
 					continue
 				else:
-					raise SafeException("Can't check implementation (v%s, %s) - missing files: " % print_args)
+					raise SafeException("Can't check implementation (v%s, %s) - missing files: %s" % print_args)
 			else:
 				process(id, recipe)
 	
