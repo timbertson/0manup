@@ -39,5 +39,9 @@ download files).
 			<manifest-digest sha256new="QXGXUB5K3WYPJIYN5L5NWVDTHVVLBAYUBD5B4SZZO76XLOVWIS4Q"/>
 			<archive href="http://gfxmonk.net/dist/0install/0manup/0manup-0.1.tgz" size="3321"/>
 		</implementation>
+		<implementation id="sha1new=35169740352e44061c9dc6ec90bc647789e03981" released="2013-07-11" version="0.2.1">
+			<manifest-digest sha256new="C2YKKPV7F2U73NMSIHVCK75SYW65SR7CFUGPSPMFWRFBVNAYUA5A"/>
+			<archive href="http://gfxmonk.net/dist/0install/0manup/0manup-0.2.1.tgz" size="3357"/>
+		</implementation>
 	</group>
 </interface>
