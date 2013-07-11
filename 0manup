@@ -15,6 +15,8 @@ from zeroinstall.zerostore import unpack, format_algorithm_digest_pair, parse_al
 from zeroinstall.injector.model import DownloadSource, FileSource, RenameStep, RemoveStep, InvalidInterface
 from xml.dom import minidom
 
+get_input = globals().get('raw_input', input)
+
 def _(s): return s
 
 logger = logging.getLogger()
@@ -236,7 +238,7 @@ def main():
 
 			if opts.interactive:
 				print("Build complete (in %s). Press return to remove\n" % (tmpdir))
-				raw_input()
+				get_input()
 
 
 	if implementation_ids:
