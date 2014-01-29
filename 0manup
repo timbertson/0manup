@@ -82,7 +82,7 @@ class Cooker(object):
 					logger.info("Failed to close: %s", ex)
 	
 	# functions required by StepRunner instances:
-	def download_url(self, download_source, **kwargs):
+	def download_archive(self, download_source, **kwargs):
 
 		mime_type = download_source.type
 		if not mime_type:
@@ -91,10 +91,12 @@ class Cooker(object):
 			raise SafeException(_("No 'type' attribute on archive, and I can't guess from the name (%s)") % download_source.url)
 		unpack.check_type_ok(mime_type)
 
-		stream = open(self.resolve_file(download_source.url))
+		stream = open(self.resolve_file(download_source.url), 'rb')
 		return (NonBlocker(), stream)
 
-	download_file = download_archive = download_url
+	def download_file(self, download_source, **kwargs):
+		stream = open(self.resolve_file(download_source.url), 'rb')
+		return (NonBlocker(), stream)
 
 	def load_feed(self, path):
 		with open(path) as stream:
@@ -134,7 +136,8 @@ class Cooker(object):
 					raise InvalidInterface(_("Missing dest attribute on <file>"))
 				size = elem.getAttribute('size')
 				if not size:
-					print("size=\"%s\"" % (os.stat(self.resolve_file(url)).st_size))
+					size = str(os.stat(self.resolve_file(url)).st_size)
+					self.setattr(elem, 'size', str(size))
 				recipe.steps.append(FileSource(url, dest, int(size)))
 
 			def add_rename(elem):
