@@ -1,5 +1,7 @@
 # 0manup
 
+<img src="http://gfxmonk.net/dist/status/project/0manup.png">
+
 Is a simple tool, with one purpose: Given an incomplete (or incorrect)
 [ZeroInstall](http://0install.net/) feed, it will generate / update
 correct &lt;manifest-digest&gt; elements as needed, and update implementation

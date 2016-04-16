@@ -230,7 +230,7 @@ def main():
 
 			try:
 				(algname, val) = parse_algorithm_digest_pair(id)
-			except BadDigest:
+			except (BadDigest, KeyError):
 				print("implementation ID is not a digest; leaving")
 			else:
 				digest = get_digest(algname, tmpdir)
